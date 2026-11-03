@@ -1,0 +1,19 @@
+{
+  "name": "stashbox-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "db:generate": "npm run --workspace=@stashbox/db generate",
+    "db:migrate": "npm run --workspace=@stashbox/db migrate",
+    "db:push": "npm run --workspace=@stashbox/db push",
+    "db:studio": "npm run --workspace=@stashbox/db studio",
+    "dev:api": "npm run --workspace=@stashbox/api dev"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
