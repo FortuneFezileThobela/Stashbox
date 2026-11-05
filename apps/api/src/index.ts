@@ -1,43 +1,31 @@
-import http from 'http';
-import { db, workspaces } from '@stashbox/db';
+import 'dotenv/config';
+import { app } from './app.js';
 
 const PORT = Number(process.env.PORT) || 4000;
+const HOST = '0.0.0.0';
 
-const server = http.createServer(async (req, res) => {
-  // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+const server = app.listen(PORT, HOST, () => {
+  console.log(`API running at http://${HOST}:${PORT}`);
+});
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  if (req.url === '/api/health') {
-    try {
-      const allWorkspaces = await db.query.workspaces.findMany({
-        with: { entries: true }
-      });
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ 
-        status: 'healthy', 
-        database: 'connected',
-        workspacesCount: allWorkspaces.length 
-      }));
-    } catch (err: any) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'error', message: err.message }));
+//container shutdown
+function handleShutdown(signal: string) {
+  console.log(`\nReceived ${signal}. Closing HTTP server...`);
+  server.close((err) => {
+    if (err) {
+      console.error('Error during server shutdown:', err);
+      process.exit(1);
     }
-    return;
-  }
+    console.log('HTTP server successfully terminated.');
+    process.exit(0);
+  });
 
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: 'Endpoint not found' }));
-});
+  // Force close after 10 seconds if connections exist
+  setTimeout(() => {
+    console.error('Forced shutdown.');
+    process.exit(1);
+  }, 10_000).unref();
+}
 
-server.listen(PORT, () => {
-  console.log(`Backend API live at http://localhost:${PORT}`);
-});
+process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+process.on('SIGINT', () => handleShutdown('SIGINT'));
