@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import { AppError } from "../middleware/errorHandler.js";
 import { db } from "@stashbox/db";
 import {
@@ -7,7 +6,7 @@ import {
   entries,
   NewWorkspace,
 } from "@stashbox/db/schema";
-import { eq, and, ilike, sql } from "drizzle-orm";
+import { eq, and, ilike, sql, or, desc, ne } from "drizzle-orm";
 
 export interface CreateWorkspaceParams {
   ownerId: string;
@@ -17,6 +16,7 @@ export interface CreateWorkspaceParams {
   visibility?: "private" | "public";
   parentId?: string;
 }
+
 export interface ListWorkspacesParams {
   userId: string;
   page?: number;
@@ -29,6 +29,7 @@ export interface AddWorkspaceMemberParams {
   targetUserId: string;
   role: "owner" | "qa" | "member";
 }
+
 export interface ForkWorkspaceParams {
   sourceWorkspaceId: string;
   userId: string;
@@ -40,9 +41,6 @@ export interface ForkWorkspaceParams {
 }
 
 export class WorkspacesService {
-  /**
-   * Lists all workspaces where the user is a member or owner
-   */
   static async listUserWorkspaces({
     userId,
     page = 1,
@@ -59,19 +57,28 @@ export class WorkspacesService {
 
     const total = Number(countResult?.count ?? 0);
 
-    const response = await db
-      .select()
+    const rows = await db
+      .select({
+        workspace: workspaces,
+        role: workspaceMembers.role,
+        joinedAt: workspaceMembers.joinedAt,
+      })
       .from(workspaceMembers)
       .innerJoin(
         workspaces,
         eq(workspaceMembers.workspaceId, workspaces.workspaceId),
       )
       .where(eq(workspaceMembers.userId, userId))
+      .orderBy(desc(workspaces.updatedAt))
       .limit(validLimit)
       .offset(offset);
 
     return {
-      workspaces: response,
+      workspaces: rows.map(({ workspace, role, joinedAt }) => ({
+        ...workspace,
+        role,
+        joinedAt,
+      })),
       pagination: {
         page: validPage,
         limit: validLimit,
@@ -80,9 +87,59 @@ export class WorkspacesService {
       },
     };
   }
-  /**
-   * Verifies if a user can read or write to a workspace
-   */
+
+  static async explorePublicWorkspaces({
+    page = 1,
+    limit = 20,
+    search,
+  }: {
+    page?: number;
+    limit?: number;
+    search?: string;
+  }) {
+    const validPage = page > 0 ? page : 1;
+    const validLimit = limit > 0 ? Math.min(limit, 100) : 20;
+    const offset = (validPage - 1) * validLimit;
+
+    const conditions = [eq(workspaces.visibility, "public")];
+    const term = search?.trim();
+    if (term) {
+      const pattern = `%${term.replace(/[\\%_]/g, "\\$&")}%`;
+      const match = or(
+        ilike(workspaces.name, pattern),
+        ilike(workspaces.handle, pattern),
+      );
+      if (match) conditions.push(match);
+    }
+
+    const where = and(...conditions);
+
+    const [countResult] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(workspaces)
+      .where(where);
+
+    const total = Number(countResult?.count ?? 0);
+
+    const items = await db
+      .select()
+      .from(workspaces)
+      .where(where)
+      .orderBy(desc(workspaces.updatedAt))
+      .limit(validLimit)
+      .offset(offset);
+
+    return {
+      workspaces: items,
+      pagination: {
+        page: validPage,
+        limit: validLimit,
+        total,
+        totalPages: Math.ceil(total / validLimit),
+      },
+    };
+  }
+
   static async assertWorkspaceAccess(
     workspaceId: string,
     userId?: string,
@@ -126,9 +183,6 @@ export class WorkspacesService {
     return { workspace, role: membership.role };
   }
 
-  /**
-   * Creates a workspace and assigns the creator as an 'owner' member in a transaction
-   */
   static async createWorkspace({
     ownerId,
     name,
@@ -175,9 +229,66 @@ export class WorkspacesService {
     });
   }
 
-  /**
-   * Adds or updates a member inside a workspace after verifying owner permissions
-   */
+  static async changeWorkspaceVisibility(
+    workspaceId: string,
+    requesterId: string,
+    visibility: "private" | "public",
+  ) {
+    const { role } = await this.assertWorkspaceAccess(
+      workspaceId,
+      requesterId,
+      true,
+    );
+    if (role !== "owner") {
+      throw new AppError(403, "Only owners can update visibility", "FORBIDDEN");
+    }
+
+    const [updated] = await db
+      .update(workspaces)
+      .set({ visibility, updatedAt: new Date() })
+      .where(eq(workspaces.workspaceId, workspaceId))
+      .returning();
+
+    return updated;
+  }
+
+  static async getWorkspaceMembers(
+    workspaceId: string,
+    requesterId: string,
+    page = 1,
+    limit = 20,
+  ) {
+    await this.assertWorkspaceAccess(workspaceId, requesterId, false);
+
+    const validPage = page > 0 ? page : 1;
+    const validLimit = limit > 0 ? Math.min(limit, 100) : 20;
+    const offset = (validPage - 1) * validLimit;
+
+    const [countResult] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(workspaceMembers)
+      .where(eq(workspaceMembers.workspaceId, workspaceId));
+
+    const total = Number(countResult?.count ?? 0);
+
+    const members = await db
+      .select()
+      .from(workspaceMembers)
+      .where(eq(workspaceMembers.workspaceId, workspaceId))
+      .limit(validLimit)
+      .offset(offset);
+
+    return {
+      members,
+      pagination: {
+        page: validPage,
+        limit: validLimit,
+        total,
+        totalPages: Math.ceil(total / validLimit),
+      },
+    };
+  }
+
   static async addMember({
     workspaceId,
     requesterId,
@@ -191,20 +302,12 @@ export class WorkspacesService {
     );
 
     if (requesterRole !== "owner") {
-      throw new AppError(
-        403,
-        "Only workspace owners can manage members",
-        "FORBIDDEN",
-      );
+      throw new AppError(403, "Only owners can manage members", "FORBIDDEN");
     }
 
     const [membership] = await db
       .insert(workspaceMembers)
-      .values({
-        workspaceId,
-        userId: targetUserId,
-        role,
-      })
+      .values({ workspaceId, userId: targetUserId, role })
       .onConflictDoUpdate({
         target: [workspaceMembers.workspaceId, workspaceMembers.userId],
         set: { role },
@@ -214,8 +317,72 @@ export class WorkspacesService {
     return membership;
   }
 
+  static async changeMemberRole(
+    workspaceId: string,
+    requesterId: string,
+    targetUserId: string,
+    role: "owner" | "qa" | "member",
+  ) {
+    const { role: requesterRole } = await this.assertWorkspaceAccess(
+      workspaceId,
+      requesterId,
+      true,
+    );
+
+    if (requesterRole !== "owner") {
+      throw new AppError(403, "Only owners can change roles", "FORBIDDEN");
+    }
+
+    const [updated] = await db
+      .update(workspaceMembers)
+      .set({ role })
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, workspaceId),
+          eq(workspaceMembers.userId, targetUserId),
+        ),
+      )
+      .returning();
+
+    if (!updated) {
+      throw new AppError(404, "Member not found", "MEMBER_NOT_FOUND");
+    }
+    return updated;
+  }
+
+  static async removeMember(
+    workspaceId: string,
+    requesterId: string,
+    targetUserId: string,
+  ) {
+    const { role: requesterRole } = await this.assertWorkspaceAccess(
+      workspaceId,
+      requesterId,
+      true,
+    );
+
+    if (requesterRole !== "owner" && requesterId !== targetUserId) {
+      throw new AppError(403, "Insufficient permissions", "FORBIDDEN");
+    }
+
+    const [deleted] = await db
+      .delete(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, workspaceId),
+          eq(workspaceMembers.userId, targetUserId),
+        ),
+      )
+      .returning();
+
+    if (!deleted) {
+      throw new AppError(404, "Member not found", "MEMBER_NOT_FOUND");
+    }
+    return deleted;
+  }
+
   /**
-   * Deep-copies an entire workspace, its entries, and (optionally) its child workspace tree
+   * Deep-clones a workspace, its accessible entries, and child sub-workspaces.
    */
   static async forkWorkspace({
     sourceWorkspaceId,
@@ -226,53 +393,55 @@ export class WorkspacesService {
     destinationParentId,
     includeChildren = true,
   }: ForkWorkspaceParams) {
-    // Verify the user has read access to the source workspace
-    const { workspace: sourceWorkspace } = await this.assertWorkspaceAccess(
-      sourceWorkspaceId,
-      userId,
-      false,
-    );
+    const { workspace: sourceWorkspace, role: sourceRole } =
+      await this.assertWorkspaceAccess(sourceWorkspaceId, userId, false);
 
-    //If forking into an existing parent workspace, verify write access there
     if (destinationParentId) {
       await this.assertWorkspaceAccess(destinationParentId, userId, true);
     }
 
     return await db.transaction(async (tx) => {
-      // Recursive helper to clone a workspace node, its entries, and its children
       const cloneNode = async (
         srcWs: typeof workspaces.$inferSelect,
         targetName: string,
         targetHandle: string,
         parentId: string | null,
       ): Promise<typeof workspaces.$inferSelect> => {
-        // Create the new workspace container
-
         const newWorkspaceValues: NewWorkspace = {
           name: targetName,
           handle: targetHandle,
           type: "personal",
           visibility,
-          parentId: parentId ?? null,
+          parentId,
           forkedFromId: srcWs.workspaceId,
         };
+
         const [newWs] = await tx
           .insert(workspaces)
           .values(newWorkspaceValues)
           .returning();
 
-        // Assign the forking user as the 'owner' of the new workspace
         await tx.insert(workspaceMembers).values({
           workspaceId: newWs.workspaceId,
           userId,
           role: "owner",
         });
 
-        // Fetch all entries in the source workspace and bulk-copy them
+        // Public viewers only clone published entries; members also clone their own drafts
+        const entryFilter = !sourceRole
+          ? and(
+              eq(entries.workspaceId, srcWs.workspaceId),
+              eq(entries.status, "qa_approved"),
+            )
+          : and(
+              eq(entries.workspaceId, srcWs.workspaceId),
+              or(ne(entries.status, "draft"), eq(entries.createdBy, userId)),
+            );
+
         const sourceEntries = await tx
           .select()
           .from(entries)
-          .where(eq(entries.workspaceId, srcWs.workspaceId));
+          .where(entryFilter);
 
         if (sourceEntries.length > 0) {
           await tx.insert(entries).values(
@@ -289,7 +458,10 @@ export class WorkspacesService {
               gotchas: entry.gotchas,
               dosAndDonts: entry.dosAndDonts,
               targetRuntimes: entry.targetRuntimes,
-              status: "draft" as const,
+              tags: entry.tags,
+              status: "qa_approved" as const,
+              verifiedBy: userId,
+              verifiedAt: new Date(),
               version: 1,
               forkedFromId: entry.entryId,
               forkedFromVersion: entry.version,
@@ -297,7 +469,6 @@ export class WorkspacesService {
           );
         }
 
-        // Optionally deep-copy child sub-workspaces recursively
         if (includeChildren) {
           const children = await tx
             .select()

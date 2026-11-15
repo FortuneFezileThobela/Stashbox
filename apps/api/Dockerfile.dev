@@ -2,16 +2,19 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Copy workspace manifests first for layer caching
-COPY package*.json ./
-COPY apps/api/package.json ./apps/api/
+# Copy root workspace manifests and shared TS configs
+COPY package.json package-lock.json* tsconfig*.json ./
 COPY packages/db/package.json ./packages/db/
+COPY apps/api/package.json ./apps/api/
 
+# Install workspace dependencies
 RUN npm install
 
-# Copy source files
-COPY . .
+# Copy database schema and API source code
+COPY packages/db ./packages/db
+COPY apps/api ./apps/api
 
 EXPOSE 4000
 
-CMD ["npm", "run", "--workspace=@stashbox/api", "dev"]
+# Start the API server (adjust script name if using "start" vs "dev")
+CMD ["npm", "run", "dev", "--workspace=@stashbox/api"]

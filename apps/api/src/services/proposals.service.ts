@@ -1,14 +1,15 @@
-import crypto from 'node:crypto';
-import { AppError } from '../middleware/errorHandler.js';
+import { AppError } from "../middleware/errorHandler.js";
 import { db } from "@stashbox/db";
-import { entryProposals, entries } from "@stashbox/db/schema";
-import { eq, and, ilike, sql } from "drizzle-orm";
+import { entryProposals, entries, users } from "@stashbox/db/schema";
+import { WorkspacesService } from "./workspaces.service.js";
+import { eq, and, sql, desc, or, ne } from "drizzle-orm";
 
 export interface CreateProposalParams {
   targetWorkspaceId: string;
   targetEntryId?: string;
   sourceEntryId?: string;
   entryType?: "snippet" | "note";
+  status?: "draft" | "pending";
   authorId: string;
   title: string;
   description: string;
@@ -24,60 +25,61 @@ export interface CreateProposalParams {
   targetRuntimes?: string[];
 }
 
-
 export class ProposalsService {
-  
-  /**
-   * Rejects a proposal without mutating the parent snippet entry
-   */
- static async rejectProposal(
-  proposalId: string,
-  reviewerId: string,
-) {
-  const proposal = await db
-    .update(entryProposals)
-    .set({
-      status: "rejected",
-      reviewedBy: reviewerId,
-      updatedAt: new Date(),
-    })
-    .where(eq(entryProposals.proposalId, proposalId))
-    .returning();
+  static async listByWorkspace(
+    workspaceId: string,
+    userId: string,
+    page = 1,
+    limit = 20,
+  ) {
+    await WorkspacesService.assertWorkspaceAccess(workspaceId, userId, false);
 
-  if (proposal.length === 0) {
-    throw new AppError(
-      404,
-      "Proposal not found",
-      "PROPOSAL_NOT_FOUND",
-    );
-  }
-
-  return proposal[0];
-}
-
-
-static async listByEntry(entryId: string, page = 1, limit = 20) {
     const validPage = page > 0 ? page : 1;
     const validLimit = limit > 0 ? Math.min(limit, 100) : 20;
     const offset = (validPage - 1) * validLimit;
 
+    // Draft proposals are strictly private to their author
+    const where = and(
+      eq(entryProposals.targetWorkspaceId, workspaceId),
+      or(
+        ne(entryProposals.status, "draft"),
+        eq(entryProposals.authorId, userId),
+      ),
+    );
+
     const [countResult] = await db
       .select({ count: sql<number>`count(*)` })
       .from(entryProposals)
-      .where(eq(entryProposals.targetEntryId, entryId));
+      .where(where);
 
     const total = Number(countResult?.count ?? 0);
 
-    const proposals = await db
-      .select()
+    const rows = await db
+      .select({
+        proposal: entryProposals,
+        author: {
+          userId: users.userId,
+          username: users.username,
+          fullName: users.fullName,
+          jobTitle: users.jobTitle,
+          profileUrl: users.profileUrl,
+        },
+        originalEntry: entries,
+      })
       .from(entryProposals)
-      .where(eq(entryProposals.targetEntryId, entryId))
+      .innerJoin(users, eq(entryProposals.authorId, users.userId))
+      .leftJoin(entries, eq(entryProposals.targetEntryId, entries.entryId))
+      .where(where)
+      .orderBy(desc(entryProposals.createdAt))
       .limit(validLimit)
       .offset(offset);
 
     return {
-      entryId,
-      proposals,
+      proposals: rows.map(({ proposal, author, originalEntry }) => ({
+        ...proposal,
+        author,
+        originalEntry,
+      })),
       pagination: {
         page: validPage,
         limit: validLimit,
@@ -86,8 +88,96 @@ static async listByEntry(entryId: string, page = 1, limit = 20) {
       },
     };
   }
-  
+
+  static async listByEntry(
+    entryId: string,
+    userId?: string,
+    page = 1,
+    limit = 20,
+  ) {
+    const [targetEntry] = await db
+      .select({ workspaceId: entries.workspaceId })
+      .from(entries)
+      .where(eq(entries.entryId, entryId))
+      .limit(1);
+
+    if (!targetEntry) {
+      throw new AppError(404, "Entry not found", "ENTRY_NOT_FOUND");
+    }
+
+    await WorkspacesService.assertWorkspaceAccess(
+      targetEntry.workspaceId,
+      userId,
+      false,
+    );
+
+    const validPage = page > 0 ? page : 1;
+    const validLimit = limit > 0 ? Math.min(limit, 100) : 20;
+    const offset = (validPage - 1) * validLimit;
+
+    const visibilityFilter = userId
+      ? or(
+          ne(entryProposals.status, "draft"),
+          eq(entryProposals.authorId, userId),
+        )
+      : ne(entryProposals.status, "draft");
+
+    const where = and(
+      eq(entryProposals.targetEntryId, entryId),
+      visibilityFilter,
+    );
+
+    const [countResult] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(entryProposals)
+      .where(where);
+
+    const total = Number(countResult?.count ?? 0);
+
+    const rows = await db
+      .select({
+        proposal: entryProposals,
+        author: {
+          userId: users.userId,
+          username: users.username,
+          fullName: users.fullName,
+          jobTitle: users.jobTitle,
+          profileUrl: users.profileUrl,
+        },
+        originalEntry: entries,
+      })
+      .from(entryProposals)
+      .innerJoin(users, eq(entryProposals.authorId, users.userId))
+      .leftJoin(entries, eq(entryProposals.targetEntryId, entries.entryId))
+      .where(where)
+      .orderBy(desc(entryProposals.createdAt))
+      .limit(validLimit)
+      .offset(offset);
+
+    return {
+      entryId,
+      proposals: rows.map(({ proposal, author, originalEntry }) => ({
+        ...proposal,
+        author,
+        originalEntry,
+      })),
+      pagination: {
+        page: validPage,
+        limit: validLimit,
+        total,
+        totalPages: Math.ceil(total / validLimit),
+      },
+    };
+  }
+
   static async createProposal(params: CreateProposalParams) {
+    // Allow any user who can read the target workspace (including public) to propose
+    await WorkspacesService.assertWorkspaceAccess(
+      params.targetWorkspaceId,
+      params.authorId,
+      false,
+    );
+
     const entryType = params.entryType ?? "snippet";
 
     if (entryType === "snippet" && (!params.code || !params.language)) {
@@ -120,6 +210,7 @@ static async listByEntry(entryId: string, page = 1, limit = 20) {
         sourceEntryId: params.sourceEntryId,
         type: proposalType,
         entryType,
+        status: params.status ?? "pending",
         title: params.title,
         description: params.description,
         code: params.code,
@@ -135,7 +226,51 @@ static async listByEntry(entryId: string, page = 1, limit = 20) {
     return proposal;
   }
 
-  static async approveProposal(proposalId: string, reviewerId: string) {
+  /**
+   * Transitions a private draft proposal into 'pending' for QA review.
+   */
+  static async submitProposal(proposalId: string, authorId: string) {
+    const [proposal] = await db
+      .select()
+      .from(entryProposals)
+      .where(eq(entryProposals.proposalId, proposalId))
+      .limit(1);
+
+    if (
+      !proposal ||
+      (proposal.status === "draft" && proposal.authorId !== authorId)
+    ) {
+      throw new AppError(404, "Proposal not found", "PROPOSAL_NOT_FOUND");
+    }
+    if (proposal.authorId !== authorId) {
+      throw new AppError(
+        403,
+        "Only the proposal author can submit it",
+        "FORBIDDEN",
+      );
+    }
+    if (proposal.status !== "draft") {
+      throw new AppError(
+        400,
+        `Cannot submit proposal in ${proposal.status} state`,
+        "INVALID_PROPOSAL_STATE",
+      );
+    }
+
+    const [updated] = await db
+      .update(entryProposals)
+      .set({ status: "pending", updatedAt: new Date() })
+      .where(eq(entryProposals.proposalId, proposalId))
+      .returning();
+
+    return updated;
+  }
+
+  static async approveProposal(
+    proposalId: string,
+    reviewerId: string,
+    forceOverride = false,
+  ) {
     return await db.transaction(async (tx) => {
       const [p] = await tx
         .select()
@@ -145,6 +280,28 @@ static async listByEntry(entryId: string, page = 1, limit = 20) {
 
       if (!p) {
         throw new AppError(404, "Proposal not found", "PROPOSAL_NOT_FOUND");
+      }
+
+      const { role } = await WorkspacesService.assertWorkspaceAccess(
+        p.targetWorkspaceId,
+        reviewerId,
+        true,
+      );
+
+      if (role !== "owner" && role !== "qa") {
+        throw new AppError(
+          403,
+          "Only QA reviewers or owners can approve proposals",
+          "FORBIDDEN",
+        );
+      }
+
+      if (p.authorId === reviewerId && !(role === "owner" && forceOverride)) {
+        throw new AppError(
+          403,
+          "Authors cannot self-approve proposals without owner override",
+          "SELF_APPROVAL_FORBIDDEN",
+        );
       }
 
       if (p.status !== "pending") {
@@ -192,7 +349,11 @@ static async listByEntry(entryId: string, page = 1, limit = 20) {
       }
 
       if (!p.targetEntryId) {
-        throw new AppError(400, "Update proposal missing targetEntryId", "INVALID_PROPOSAL");
+        throw new AppError(
+          400,
+          "Update proposal missing targetEntryId",
+          "INVALID_PROPOSAL",
+        );
       }
 
       const [updatedEntry] = await tx
@@ -218,5 +379,114 @@ static async listByEntry(entryId: string, page = 1, limit = 20) {
 
       return { proposalId, status: "approved", entry: updatedEntry };
     });
+  }
+
+  static async rejectProposal(
+    proposalId: string,
+    reviewerId: string,
+    reviewFeedback?: string,
+  ) {
+    const [existing] = await db
+      .select()
+      .from(entryProposals)
+      .where(eq(entryProposals.proposalId, proposalId))
+      .limit(1);
+
+    if (!existing) {
+      throw new AppError(404, "Proposal not found", "PROPOSAL_NOT_FOUND");
+    }
+
+    const { role } = await WorkspacesService.assertWorkspaceAccess(
+      existing.targetWorkspaceId,
+      reviewerId,
+      true,
+    );
+
+    if (role !== "owner" && role !== "qa") {
+      throw new AppError(
+        403,
+        "Only QA reviewers or owners can reject proposals",
+        "FORBIDDEN",
+      );
+    }
+
+    const [updated] = await db
+      .update(entryProposals)
+      .set({
+        status: "rejected",
+        reviewedBy: reviewerId,
+        reviewFeedback: reviewFeedback ?? existing.reviewFeedback,
+        updatedAt: new Date(),
+      })
+      .where(eq(entryProposals.proposalId, proposalId))
+      .returning();
+
+    return updated;
+  }
+
+  /**
+   * Clones a visible proposal into a user's own workspace as a standalone entry.
+   */
+  static async forkProposalIntoWorkspace(
+    proposalId: string,
+    destinationWorkspaceId: string,
+    userId: string,
+  ) {
+    const [proposal] = await db
+      .select()
+      .from(entryProposals)
+      .where(eq(entryProposals.proposalId, proposalId))
+      .limit(1);
+
+    if (
+      !proposal ||
+      (proposal.status === "draft" && proposal.authorId !== userId)
+    ) {
+      throw new AppError(404, "Proposal not found", "PROPOSAL_NOT_FOUND");
+    }
+
+    await WorkspacesService.assertWorkspaceAccess(
+      proposal.targetWorkspaceId,
+      userId,
+      false,
+    );
+
+    const { workspace: targetWorkspace } =
+      await WorkspacesService.assertWorkspaceAccess(
+        destinationWorkspaceId,
+        userId,
+        true,
+      );
+
+    const originEntryId =
+      proposal.sourceEntryId ?? proposal.targetEntryId ?? null;
+    const isPersonal = targetWorkspace.type === "personal";
+
+    const [forkedEntry] = await db
+      .insert(entries)
+      .values({
+        workspaceId: destinationWorkspaceId,
+        type: proposal.entryType,
+        title: proposal.title,
+        description: proposal.description,
+        code: proposal.code,
+        language: proposal.language,
+        notes: proposal.notes,
+        gotchas: proposal.gotchas,
+        dosAndDonts: proposal.dosAndDonts,
+        targetRuntimes: proposal.targetRuntimes,
+        tags: [],
+        status: isPersonal ? "qa_approved" : "draft",
+        version: 1,
+        verifiedBy: isPersonal ? userId : null,
+        verifiedAt: isPersonal ? new Date() : null,
+        forkedFromId: originEntryId,
+        forkedFromVersion: originEntryId ? 1 : null,
+        createdBy: userId,
+        updatedBy: userId,
+      })
+      .returning();
+
+    return forkedEntry;
   }
 }
