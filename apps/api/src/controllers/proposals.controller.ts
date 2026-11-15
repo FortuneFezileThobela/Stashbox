@@ -38,4 +38,29 @@ export const ProposalsController = {
 
     res.status(200).json(result);
   }),
+
+  listByWorkspace: asyncHandler(async (req: Request, res: Response) => {
+    const result = await ProposalsService.listByWorkspace(
+      req.params.workspaceId,
+      req.user!.id,
+    );
+    res.status(200).json(result);
+  }),
+
+  submit: asyncHandler(async (req: Request, res: Response) => {
+    const proposal = await ProposalsService.submitProposal(
+      req.params.proposalId,
+      req.user!.id,
+    );
+    res.status(200).json({ proposal });
+  }),
+
+  fork: asyncHandler(async (req: Request, res: Response) => {
+    const entry = await ProposalsService.forkProposalIntoWorkspace(
+      req.params.proposalId,
+      req.body.destinationWorkspaceId,
+      req.user!.id,
+    );
+    res.status(201).json({ entry });
+  }),
 };

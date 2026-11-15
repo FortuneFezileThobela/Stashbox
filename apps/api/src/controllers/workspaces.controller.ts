@@ -58,4 +58,53 @@ export const WorkspacesController = {
 
     res.status(201).json({ workspace: forkedWorkspace });
   }),
+
+  explorePublic: asyncHandler(async (req: Request, res: Response) => {
+    const { page, limit, search } = req.query as any;
+    const result = await WorkspacesService.explorePublicWorkspaces({
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+      search,
+    });
+    res.status(200).json(result);
+  }),
+
+  updateVisibility: asyncHandler(async (req: Request, res: Response) => {
+    const workspace = await WorkspacesService.changeWorkspaceVisibility(
+      req.params.workspaceId,
+      req.user!.id,
+      req.body.visibility,
+    );
+    res.status(200).json({ workspace });
+  }),
+
+  listMembers: asyncHandler(async (req: Request, res: Response) => {
+    const { page, limit } = req.query as any;
+    const result = await WorkspacesService.getWorkspaceMembers(
+      req.params.workspaceId,
+      req.user!.id,
+      page ? Number(page) : undefined,
+      limit ? Number(limit) : undefined,
+    );
+    res.status(200).json(result);
+  }),
+
+  updateMemberRole: asyncHandler(async (req: Request, res: Response) => {
+    const membership = await WorkspacesService.changeMemberRole(
+      req.params.workspaceId,
+      req.user!.id,
+      req.params.userId,
+      req.body.role,
+    );
+    res.status(200).json({ membership });
+  }),
+
+  removeMember: asyncHandler(async (req: Request, res: Response) => {
+    const membership = await WorkspacesService.removeMember(
+      req.params.workspaceId,
+      req.user!.id,
+      req.params.userId,
+    );
+    res.status(200).json({ deleted: true, membership });
+  }),
 };

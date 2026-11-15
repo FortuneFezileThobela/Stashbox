@@ -65,4 +65,18 @@ export const EntriesController = {
 
     res.status(201).json({ entry });
   }),
+
+  submit: asyncHandler(async (req: Request, res: Response) => {
+  const entry = await EntriesService.submitEntry(req.params.entryId, req.user!.id);
+  res.status(200).json({ entry });
+}),
+
+approve: asyncHandler(async (req: Request, res: Response) => {
+  const entry = await EntriesService.approveEntry(
+    req.params.entryId,
+    req.user!.id,
+    Boolean(req.body?.forceOverride),
+  );
+  res.status(200).json({ entry });
+}),
 };
