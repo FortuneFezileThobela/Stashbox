@@ -19,9 +19,22 @@ declare global {
   }
 }
 
+const DEFAULT_TOKEN_TOUCH_INTERVAL_MS = 5 * 60_000;
+const parsedTouchInterval = Number(process.env.TOKEN_TOUCH_INTERVAL_MS);
+const TOKEN_TOUCH_INTERVAL_MS =
+  Number.isFinite(parsedTouchInterval) && parsedTouchInterval >= 0
+    ? parsedTouchInterval
+    : DEFAULT_TOKEN_TOUCH_INTERVAL_MS;
+
 /**
- * Generates a raw Personal Access Token and its SHA-256 hash for DB storage
+ * Hashes a raw bearer token using SHA-256
  */
+export function hashApiToken(rawToken: string): string {
+  return crypto.createHash("sha256").update(rawToken).digest("hex");
+}
+
+
+//generates a new personal access token and its corresponding hash for storage in the database. The raw token is returned to the user, while the hash is stored for authentication purposes.
 export function generatePersonalAccessToken(): {
   rawToken: string;
   tokenHash: string;
@@ -32,28 +45,30 @@ export function generatePersonalAccessToken(): {
   return { rawToken, tokenHash };
 }
 
-/**
- * Hashes a raw bearer token using SHA-256
- */
-export function hashApiToken(rawToken: string): string {
-  return crypto.createHash("sha256").update(rawToken).digest("hex");
+function shouldTouchLastUsed(
+  lastUsedAt: Date | string | null,
+  nowMs: number,
+): boolean {
+  if (!lastUsedAt) return true;
+  const lastUsedMs = new Date(lastUsedAt).getTime();
+  if (Number.isNaN(lastUsedMs)) return true;
+  return nowMs - lastUsedMs > TOKEN_TOUCH_INTERVAL_MS;
 }
 
-/**
- * Core token validation logic used by both requireAuth and optionalAuth
- */
+
+//validates the provided raw bearer token, checks if it exists in the database, and returns the associated user if valid. If the token is invalid or revoked, it returns null.
 async function resolveUserFromToken(
   rawToken: string,
 ): Promise<AuthenticatedUser | null> {
   const tokenHash = hashApiToken(rawToken);
   const now = new Date();
 
-  // Query database for valid, non-expired API token joined with user record
   const [record] = await db
     .select({
       userId: users.userId,
       email: users.email,
       tokenId: apiTokens.tokenId,
+      lastUsedAt: apiTokens.lastUsedAt,
     })
     .from(apiTokens)
     .innerJoin(users, eq(apiTokens.userId, users.userId))
@@ -69,14 +84,15 @@ async function resolveUserFromToken(
     return null;
   }
 
-  // Asynchronously update lastUsedAt without blocking request flow
-  db.update(apiTokens)
-    .set({ lastUsedAt: now })
-    .where(eq(apiTokens.tokenId, record.tokenId))
-    .execute()
-    .catch(() => {
-      // Non critical background update failure
-    });
+  if (shouldTouchLastUsed(record.lastUsedAt, now.getTime())) {
+    db.update(apiTokens)
+      .set({ lastUsedAt: now })
+      .where(eq(apiTokens.tokenId, record.tokenId))
+      .execute()
+      .catch(() => {
+        // Non-critical background update failure
+      });
+  }
 
   return {
     id: record.userId,
@@ -84,9 +100,9 @@ async function resolveUserFromToken(
   };
 }
 
-/**
- * Middleware: Protects routes requiring strict authentication
- */
+
+
+//protects routes that require strict authentication. If the request does not have a valid bearer token, it will throw an AppError with a 401 status code.
 export const requireAuth = asyncHandler(
   async (req: Request, _res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
@@ -99,8 +115,15 @@ export const requireAuth = asyncHandler(
       );
     }
 
-    console.log("Authorization header:", authHeader); // Debug log
     const rawToken = authHeader.replace("Bearer ", "").trim();
+    if (!rawToken) {
+      throw new AppError(
+        401,
+        "Missing or malformed Authorization header",
+        "UNAUTHORIZED",
+      );
+    }
+
     const user = await resolveUserFromToken(rawToken);
 
     if (!user) {
@@ -112,22 +135,23 @@ export const requireAuth = asyncHandler(
   },
 );
 
-/**
- * Middleware: Optional auth for public routes (e.g. public workspaces & snippets)
- */
+
+//optionalAuth is used for routes that can be accessed by both authenticated and unauthenticated users.
 export const optionalAuth = asyncHandler(
   async (req: Request, _res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
 
     if (authHeader && authHeader.startsWith("Bearer ")) {
       const rawToken = authHeader.replace("Bearer ", "").trim();
-      try {
-        const user = await resolveUserFromToken(rawToken);
-        if (user) {
-          req.user = user;
+      if (rawToken) {
+        try {
+          const user = await resolveUserFromToken(rawToken);
+          if (user) {
+            req.user = user;
+          }
+        } catch {
+          // Suppress auth lookup errors for optional guests
         }
-      } catch {
-        // Suppress auth lookup errors for optional guests
       }
     }
 

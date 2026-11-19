@@ -1,13 +1,9 @@
 import crypto from "node:crypto";
-import { eq, and, or } from "drizzle-orm";
+import bcrypt from "bcryptjs";
 import { db } from "@stashbox/db";
-import { apiTokens, users } from "@stashbox/db/schema";
-import {
-  generatePersonalAccessToken,
-  hashApiToken,
-} from "../middleware/auth.js";
+import { users, apiTokens } from "@stashbox/db/schema";
+import { eq, desc, and, or } from "drizzle-orm";
 import { AppError } from "../middleware/errorHandler.js";
-
 
 export interface UpdateProfileParams {
   fullName?: string;
@@ -19,6 +15,7 @@ export interface UpdateProfileParams {
   primaryLanguages?: string[];
   themePreference?: "dark" | "light";
 }
+
 export interface CreateTokenParams {
   userId: string;
   name: string;
@@ -43,54 +40,152 @@ export interface LoginUserParams {
   password: string;
 }
 
-function hashPassword(password: string): string {
-  return crypto.createHash("sha256").update(password).digest("hex");
+type UserRecord = {
+  userId: string;
+  email: string;
+  username: string;
+  fullName: string;
+  jobTitle: string | null;
+  organization: string | null;
+  bio: string | null;
+  primaryLanguages: string[] | null;
+  githubId: string | null;
+  profileUrl: string | null;
+  themePreference: "dark" | "light" | string;
+};
+
+const MS_PER_DAY = 86_400_000;
+const DEFAULT_SESSION_EXPIRY_DAYS = 30;
+const BCRYPT_ROUNDS = Number(process.env.BCRYPT_ROUNDS ?? 12);
+
+const sha256 = (value: string) =>
+  crypto.createHash("sha256").update(value).digest("hex");
+
+const isLegacyHash = (hash: string) => /^[a-f0-9]{64}$/.test(hash);
+
+export const hashPassword = (password: string) =>
+  bcrypt.hash(password, BCRYPT_ROUNDS);
+
+export const hashApiToken = (rawToken: string) => sha256(rawToken);
+
+export function generatePersonalAccessToken() {
+  const rawToken = `sbx_${crypto.randomBytes(32).toString("hex")}`;
+  return {
+    rawToken,
+    tokenHash: hashApiToken(rawToken),
+  };
+}
+
+export async function verifyPassword(
+  password: string,
+  stored: string,
+): Promise<boolean> {
+  if (isLegacyHash(stored)) {
+    const a = Buffer.from(sha256(password), "utf8");
+    const b = Buffer.from(stored, "utf8");
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+  return bcrypt.compare(password, stored);
+}
+
+function normalizeGithubProfile(
+  rawGithubId?: string | null,
+  rawProfileUrl?: string | null,
+) {
+  const githubId = rawGithubId?.trim().replace(/^@/, "") || null;
+  const profileUrl =
+    rawProfileUrl?.trim() ||
+    (githubId ? `https://github.com/${githubId}.png` : null);
+
+  return { githubId, profileUrl };
+}
+
+function formatUserProfile(user: UserRecord) {
+  return {
+    id: user.userId,
+    userId: user.userId,
+    email: user.email,
+    username: user.username,
+    fullName: user.fullName,
+    jobTitle: user.jobTitle,
+    organization: user.organization,
+    bio: user.bio,
+    primaryLanguages: user.primaryLanguages,
+    githubId: user.githubId,
+    profileUrl: user.profileUrl,
+    themePreference: user.themePreference,
+  };
 }
 
 export class AuthService {
+  static async getProfile(userId: string) {
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.userId, userId))
+      .limit(1);
 
+    if (!user) {
+      throw new AppError(404, "User not found", "USER_NOT_FOUND");
+    }
 
-  static async updateProfile(userId: string, updates: UpdateProfileParams) {
-  const cleanGithubId = updates.githubId?.trim().replace(/^@/, "") || null;
-  const cleanProfileUrl =
-    updates.profileUrl?.trim() ||
-    (cleanGithubId ? `https://github.com/${cleanGithubId}.png` : null);
-
-  const [updated] = await db
-    .update(users)
-    .set({
-      ...(updates.fullName ? { fullName: updates.fullName.trim() } : {}),
-      jobTitle: updates.jobTitle?.trim() ?? null,
-      organization: updates.organization?.trim() ?? null,
-      bio: updates.bio?.trim() ?? null,
-      githubId: cleanGithubId,
-      profileUrl: cleanProfileUrl,
-      ...(updates.primaryLanguages ? { primaryLanguages: updates.primaryLanguages } : {}),
-      ...(updates.themePreference ? { themePreference: updates.themePreference } : {}),
-      updatedAt: new Date(),
-    })
-    .where(eq(users.userId, userId))
-    .returning();
-
-  if (!updated) {
-    throw new AppError(404, "User not found", "USER_NOT_FOUND");
+    return formatUserProfile(user);
   }
 
-  return {
-    id: updated.userId,
-    userId: updated.userId,
-    email: updated.email,
-    username: updated.username,
-    fullName: updated.fullName,
-    jobTitle: updated.jobTitle,
-    organization: updated.organization,
-    bio: updated.bio,
-    primaryLanguages: updated.primaryLanguages,
-    githubId: updated.githubId,
-    profileUrl: updated.profileUrl,
-    themePreference: updated.themePreference,
-  };
-}
+  static async listTokens(userId: string, currentTokenHash?: string) {
+    const now = new Date();
+    const rows = await db
+      .select({
+        id: apiTokens.tokenId,
+        name: apiTokens.name,
+        tokenHash: apiTokens.tokenHash,
+        createdAt: apiTokens.createdAt,
+        lastUsedAt: apiTokens.lastUsedAt,
+        expiresAt: apiTokens.expiresAt,
+      })
+      .from(apiTokens)
+      .where(eq(apiTokens.userId, userId))
+      .orderBy(desc(apiTokens.createdAt));
+
+    return rows.map(({ tokenHash, ...token }) => ({
+      ...token,
+      isCurrent: Boolean(currentTokenHash && tokenHash === currentTokenHash),
+      expired: Boolean(token.expiresAt && token.expiresAt < now),
+    }));
+  }
+
+  static async updateProfile(userId: string, updates: UpdateProfileParams) {
+    const { githubId, profileUrl } = normalizeGithubProfile(
+      updates.githubId,
+      updates.profileUrl,
+    );
+
+    const [updated] = await db
+      .update(users)
+      .set({
+        ...(updates.fullName ? { fullName: updates.fullName.trim() } : {}),
+        jobTitle: updates.jobTitle?.trim() || null,
+        organization: updates.organization?.trim() || null,
+        bio: updates.bio?.trim() || null,
+        githubId,
+        profileUrl,
+        ...(updates.primaryLanguages
+          ? { primaryLanguages: updates.primaryLanguages }
+          : {}),
+        ...(updates.themePreference
+          ? { themePreference: updates.themePreference }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(users.userId, userId))
+      .returning();
+
+    if (!updated) {
+      throw new AppError(404, "User not found", "USER_NOT_FOUND");
+    }
+
+    return formatUserProfile(updated);
+  }
 
   static async verifyPersonalAccessToken(rawToken: string) {
     const tokenHash = hashApiToken(rawToken);
@@ -112,7 +207,8 @@ export class AuthService {
       })
       .from(apiTokens)
       .innerJoin(users, eq(apiTokens.userId, users.userId))
-      .where(eq(apiTokens.tokenHash, tokenHash));
+      .where(eq(apiTokens.tokenHash, tokenHash))
+      .limit(1);
 
     if (!record) {
       throw new AppError(401, "Invalid or revoked API token", "UNAUTHORIZED");
@@ -122,25 +218,13 @@ export class AuthService {
       throw new AppError(401, "API token has expired", "TOKEN_EXPIRED");
     }
 
+    const now = new Date();
     await db
       .update(apiTokens)
-      .set({ lastUsedAt: new Date(), updatedAt: new Date() })
+      .set({ lastUsedAt: now, updatedAt: now })
       .where(eq(apiTokens.tokenHash, tokenHash));
 
-    return {
-      id: record.userId,
-      userId: record.userId,
-      email: record.email,
-      username: record.username,
-      fullName: record.fullName,
-      jobTitle: record.jobTitle,
-      organization: record.organization,
-      bio: record.bio,
-      primaryLanguages: record.primaryLanguages,
-      githubId: record.githubId,
-      profileUrl: record.profileUrl,
-      themePreference: record.themePreference,
-    };
+    return formatUserProfile(record);
   }
 
   static async register(input: RegisterUserParams) {
@@ -151,16 +235,16 @@ export class AuthService {
       .replace(/[^a-z0-9_-]/g, "");
     const fullName = input.fullName?.trim();
     const password = input.password;
-    const githubId = input.githubId?.trim().replace(/^@/, "") || null;
-    const profileUrl =
-      input.profileUrl?.trim() ||
-      (githubId ? `https://github.com/${githubId}.png` : null);
+    const { githubId, profileUrl } = normalizeGithubProfile(
+      input.githubId,
+      input.profileUrl,
+    );
 
     if (!email || !username || !fullName || !password) {
       throw new AppError(
         400,
         "Full name, username, email, and password are required",
-        "BAD_REQUEST"
+        "BAD_REQUEST",
       );
     }
 
@@ -168,7 +252,7 @@ export class AuthService {
       throw new AppError(
         400,
         "Password must be at least 8 characters",
-        "BAD_REQUEST"
+        "BAD_REQUEST",
       );
     }
 
@@ -178,17 +262,19 @@ export class AuthService {
         username: users.username,
       })
       .from(users)
-      .where(or(eq(users.email, email), eq(users.username, username)));
+      .where(or(eq(users.email, email), eq(users.username, username)))
+      .limit(1);
 
     if (existingUser) {
-      const conflictField =
-        existingUser.email === email ? "Email" : "Username";
+      const conflictField = existingUser.email === email ? "Email" : "Username";
       throw new AppError(
         409,
         `${conflictField} is already taken`,
-        "USER_ALREADY_EXISTS"
+        "USER_ALREADY_EXISTS",
       );
     }
+
+    const passwordHash = await hashPassword(password);
 
     const [createdUser] = await db
       .insert(users)
@@ -196,7 +282,7 @@ export class AuthService {
         email,
         username,
         fullName,
-        passwordHash: hashPassword(password),
+        passwordHash,
         jobTitle: input.jobTitle?.trim() || null,
         organization: input.organization?.trim() || null,
         bio: input.bio?.trim() || null,
@@ -213,25 +299,12 @@ export class AuthService {
     const tokenData = await this.createToken({
       userId: createdUser.userId,
       name: "Web Session",
-      expiresInDays: 30,
+      expiresInDays: DEFAULT_SESSION_EXPIRY_DAYS,
     });
 
     return {
       token: tokenData.token,
-      user: {
-        id: createdUser.userId,
-        userId: createdUser.userId,
-        email: createdUser.email,
-        username: createdUser.username,
-        fullName: createdUser.fullName,
-        jobTitle: createdUser.jobTitle,
-        organization: createdUser.organization,
-        bio: createdUser.bio,
-        primaryLanguages: createdUser.primaryLanguages,
-        githubId: createdUser.githubId,
-        profileUrl: createdUser.profileUrl,
-        themePreference: createdUser.themePreference,
-      },
+      user: formatUserProfile(createdUser),
     };
   }
 
@@ -246,45 +319,50 @@ export class AuthService {
     const [user] = await db
       .select()
       .from(users)
-      .where(eq(users.email, email));
+      .where(eq(users.email, email))
+      .limit(1);
 
     if (!user || !user.passwordHash) {
-      throw new AppError(401, "Invalid email or password", "INVALID_CREDENTIALS");
+      throw new AppError(
+        401,
+        "Invalid email or password",
+        "INVALID_CREDENTIALS",
+      );
     }
 
-    if (user.passwordHash !== hashPassword(password)) {
-      throw new AppError(401, "Invalid email or password", "INVALID_CREDENTIALS");
+    const isValid = await verifyPassword(password, user.passwordHash);
+    if (!isValid) {
+      throw new AppError(
+        401,
+        "Invalid email or password",
+        "INVALID_CREDENTIALS",
+      );
+    }
+
+    if (isLegacyHash(user.passwordHash)) {
+      const upgradedHash = await hashPassword(password);
+      await db
+        .update(users)
+        .set({ passwordHash: upgradedHash, updatedAt: new Date() })
+        .where(eq(users.userId, user.userId));
     }
 
     const tokenData = await this.createToken({
       userId: user.userId,
       name: "Web Session",
-      expiresInDays: 30,
+      expiresInDays: DEFAULT_SESSION_EXPIRY_DAYS,
     });
 
     return {
       token: tokenData.token,
-      user: {
-        id: user.userId,
-        userId: user.userId,
-        email: user.email,
-        username: user.username,
-        fullName: user.fullName,
-        jobTitle: user.jobTitle,
-        organization: user.organization,
-        bio: user.bio,
-        primaryLanguages: user.primaryLanguages,
-        githubId: user.githubId,
-        profileUrl: user.profileUrl,
-        themePreference: user.themePreference,
-      },
+      user: formatUserProfile(user),
     };
   }
 
   static async createToken({ userId, name, expiresInDays }: CreateTokenParams) {
     const { rawToken, tokenHash } = generatePersonalAccessToken();
     const expiresAt = expiresInDays
-      ? new Date(Date.now() + expiresInDays * 86_400_000)
+      ? new Date(Date.now() + expiresInDays * MS_PER_DAY)
       : null;
 
     const [insertedToken] = await db
@@ -321,7 +399,11 @@ export class AuthService {
       .returning({ id: apiTokens.tokenId });
 
     if (!deletedToken) {
-      throw new AppError(404, "Token not found or unauthorized", "TOKEN_NOT_FOUND");
+      throw new AppError(
+        404,
+        "Token not found or unauthorized",
+        "TOKEN_NOT_FOUND",
+      );
     }
 
     return { revoked: true, tokenId: deletedToken.id };

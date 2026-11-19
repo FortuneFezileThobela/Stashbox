@@ -2,7 +2,27 @@ import { AppError } from "../middleware/errorHandler.js";
 import { db } from "@stashbox/db";
 import { entryProposals, entries, users } from "@stashbox/db/schema";
 import { WorkspacesService } from "./workspaces.service.js";
+import { EntriesService } from "./entries.service.js";
 import { eq, and, sql, desc, or, ne } from "drizzle-orm";
+
+const authorColumns = {
+  userId: users.userId,
+  username: users.username,
+  fullName: users.fullName,
+  jobTitle: users.jobTitle,
+  profileUrl: users.profileUrl,
+};
+
+export interface UpdateDraftProposalParams {
+  title?: string;
+  description?: string;
+  code?: string;
+  language?: string;
+  notes?: string;
+  gotchas?: string;
+  dosAndDonts?: CreateProposalParams["dosAndDonts"];
+  targetRuntimes?: string[];
+}
 
 export interface CreateProposalParams {
   targetWorkspaceId: string;
@@ -189,15 +209,21 @@ export class ProposalsService {
     }
 
     if (params.targetEntryId) {
-      const [entry] = await db
-        .select({ id: entries.entryId })
-        .from(entries)
-        .where(eq(entries.entryId, params.targetEntryId))
-        .limit(1);
-
-      if (!entry) {
-        throw new AppError(404, "Target entry not found", "ENTRY_NOT_FOUND");
+      // Also enforces draft privacy and read access to the entry
+      const target = await EntriesService.getEntryById(
+        params.targetEntryId,
+        params.authorId,
+      );
+      if (target.workspaceId !== params.targetWorkspaceId) {
+        throw new AppError(
+          400,
+          "That entry belongs to a different workspace",
+          "PROPOSAL_WORKSPACE_MISMATCH",
+        );
       }
+    }
+    if (params.sourceEntryId) {
+      await EntriesService.getEntryById(params.sourceEntryId, params.authorId);
     }
 
     const proposalType = params.targetEntryId ? "update_entry" : "new_entry";
@@ -276,8 +302,8 @@ export class ProposalsService {
         .select()
         .from(entryProposals)
         .where(eq(entryProposals.proposalId, proposalId))
-        .limit(1);
-
+        .limit(1)
+        .for("update");
       if (!p) {
         throw new AppError(404, "Proposal not found", "PROPOSAL_NOT_FOUND");
       }
@@ -488,5 +514,124 @@ export class ProposalsService {
       .returning();
 
     return forkedEntry;
+  }
+
+  static async getProposalById(proposalId: string, userId: string) {
+    const [row] = await db
+      .select({
+        proposal: entryProposals,
+        author: authorColumns,
+        originalEntry: entries,
+      })
+      .from(entryProposals)
+      .innerJoin(users, eq(entryProposals.authorId, users.userId))
+      .leftJoin(entries, eq(entryProposals.targetEntryId, entries.entryId))
+      .where(eq(entryProposals.proposalId, proposalId))
+      .limit(1);
+
+    // Someone else's draft looks exactly like a proposal that doesn't exist
+    if (
+      !row ||
+      (row.proposal.status === "draft" && row.proposal.authorId !== userId)
+    ) {
+      throw new AppError(404, "Proposal not found", "PROPOSAL_NOT_FOUND");
+    }
+
+    await WorkspacesService.assertWorkspaceAccess(
+      row.proposal.targetWorkspaceId,
+      userId,
+      false,
+    );
+    return {
+      ...row.proposal,
+      author: row.author,
+      originalEntry: row.originalEntry,
+    };
+  }
+
+  static async updateDraftProposal(
+    proposalId: string,
+    authorId: string,
+    updates: UpdateDraftProposalParams,
+  ) {
+    const [existing] = await db
+      .select()
+      .from(entryProposals)
+      .where(eq(entryProposals.proposalId, proposalId))
+      .limit(1);
+
+    if (!existing || existing.authorId !== authorId) {
+      throw new AppError(404, "Proposal not found", "PROPOSAL_NOT_FOUND");
+    }
+    if (existing.status !== "draft") {
+      throw new AppError(
+        400,
+        "Only drafts can be edited",
+        "INVALID_PROPOSAL_STATE",
+      );
+    }
+
+    const code = updates.code ?? existing.code;
+    const language = updates.language ?? existing.language;
+    if (existing.entryType === "snippet" && (!code || !language)) {
+      throw new AppError(
+        400,
+        "Snippet proposals require code and language",
+        "INVALID_PROPOSAL_SHAPE",
+      );
+    }
+
+  
+    const [updated] = await db
+      .update(entryProposals)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(
+        and(
+          eq(entryProposals.proposalId, proposalId),
+          eq(entryProposals.status, "draft"),
+        ),
+      )
+      .returning();
+
+    if (!updated)
+      throw new AppError(
+        400,
+        "Only drafts can be edited",
+        "INVALID_PROPOSAL_STATE",
+      );
+    return updated;
+  }
+
+  static async deleteDraftProposal(proposalId: string, authorId: string) {
+    const [existing] = await db
+      .select({
+        authorId: entryProposals.authorId,
+        status: entryProposals.status,
+      })
+      .from(entryProposals)
+      .where(eq(entryProposals.proposalId, proposalId))
+      .limit(1);
+
+    if (!existing || existing.authorId !== authorId) {
+      throw new AppError(404, "Proposal not found", "PROPOSAL_NOT_FOUND");
+    }
+    if (existing.status !== "draft") {
+      throw new AppError(
+        400,
+        "Only drafts can be deleted",
+        "INVALID_PROPOSAL_STATE",
+      );
+    }
+
+    await db
+      .delete(entryProposals)
+      .where(
+        and(
+          eq(entryProposals.proposalId, proposalId),
+          eq(entryProposals.status, "draft"),
+        ),
+      );
+
+    return { deleted: true, proposalId };
   }
 }
