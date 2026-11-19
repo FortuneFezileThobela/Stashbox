@@ -12,9 +12,8 @@ export class AppError extends Error {
   }
 }
 
-/**
- * Wraps async route handlers so rejected promises forward to errorHandler
- */
+
+//wraps async route handles so the promise rejection is caught and forwarded to the errorHandler middleware.
 export function asyncHandler(
   fn: (req: Request, res: Response, next: NextFunction) => Promise< unknown >
 ): RequestHandler {
@@ -35,9 +34,7 @@ export function notFoundHandler(req: Request, res: Response) {
   });
 }
 
-/**
- * Global Error Formatter
- */
+
 export function errorHandler(
   err: unknown,
   _req: Request,

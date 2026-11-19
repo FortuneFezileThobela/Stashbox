@@ -8,7 +8,7 @@ import {
 } from "@stashbox/db/schema";
 import { EntriesService } from "./entries.service.js";
 import { WorkspacesService } from "./workspaces.service.js";
-import { eq, asc, desc } from "drizzle-orm";
+import { eq, asc, desc, sql } from "drizzle-orm";
 
 export interface CreateThreadParams {
   entryId: string;
@@ -30,7 +30,6 @@ export interface CreateCommentParams {
 
 export class DiscussionsService {
   static async listThreadsByEntry(entryId: string, userId?: string) {
-    // Enforces workspace visibility & private draft hiding
     await EntriesService.getEntryById(entryId, userId);
 
     const threads = await db
@@ -42,13 +41,21 @@ export class DiscussionsService {
           fullName: users.fullName,
           profileUrl: users.profileUrl,
         },
+        commentCount: sql<number>`(
+          select count(*)::int from ${discussionComments}
+          where ${discussionComments.threadId} = ${discussionThreads.threadId}
+        )`,
       })
       .from(discussionThreads)
       .innerJoin(users, eq(discussionThreads.createdBy, users.userId))
       .where(eq(discussionThreads.entryId, entryId))
       .orderBy(desc(discussionThreads.createdAt));
 
-    return threads.map(({ thread, author }) => ({ ...thread, author }));
+    return threads.map(({ thread, author, commentCount }) => ({
+      ...thread,
+      author,
+      commentCount,
+    }));
   }
 
   static async getThreadWithComments(threadId: string, userId?: string) {
@@ -105,6 +112,13 @@ export class DiscussionsService {
       throw new AppError(400, "Invalid line range", "INVALID_LINE_RANGE");
     }
 
+    if (params.lineStart !== undefined && params.lineEnd !== undefined) {
+      const lineCount = entry.code ? entry.code.split("\n").length : 0;
+      if (lineCount === 0 || params.lineEnd > lineCount) {
+        throw new AppError(400, "Invalid line range", "INVALID_LINE_RANGE");
+      }
+    }
+
     const [thread] = await db
       .insert(discussionThreads)
       .values({
@@ -139,7 +153,6 @@ export class DiscussionsService {
       );
     }
 
-    // Any user with read access to the entry (including public viewers) can comment
     await EntriesService.getEntryById(thread.entryId, params.authorId);
 
     const [comment] = await db
@@ -177,23 +190,26 @@ export class DiscussionsService {
       );
     }
 
+    await EntriesService.getEntryById(thread.entryId, userId);
+
     const [entry] = await db
       .select()
       .from(entries)
       .where(eq(entries.entryId, thread.entryId))
       .limit(1);
 
+    if (!entry) throw new AppError(404, "Entry not found", "ENTRY_NOT_FOUND");
+
     const { role } = await WorkspacesService.assertWorkspaceAccess(
       entry.workspaceId,
       userId,
-      true,
+      false,
     );
 
     const canResolve =
       thread.createdBy === userId ||
-      entry.createdBy === userId ||
-      role === "owner" ||
-      role === "qa";
+      (role !== null &&
+        (entry.createdBy === userId || role === "owner" || role === "qa"));
 
     if (!canResolve) {
       throw new AppError(

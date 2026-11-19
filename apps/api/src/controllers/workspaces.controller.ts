@@ -29,12 +29,13 @@ export const WorkspacesController = {
 
   addMember: asyncHandler(async (req: Request, res: Response) => {
     const { workspaceId } = req.params;
-    const { userId, role } = req.body;
+    const { userId, username, role } = req.body;
 
     const membership = await WorkspacesService.addMember({
       workspaceId,
       requesterId: req.user!.id,
       targetUserId: userId,
+      targetUsername: username,
       role,
     });
 
@@ -57,6 +58,16 @@ export const WorkspacesController = {
     });
 
     res.status(201).json({ workspace: forkedWorkspace });
+  }),
+
+  searchMemberCandidates: asyncHandler(async (req: Request, res: Response) => {
+    const q = typeof req.query.q === "string" ? req.query.q : "";
+    const candidates = await WorkspacesService.searchMemberCandidates(
+      req.params.workspaceId,
+      req.user!.id,
+      q,
+    );
+    res.status(200).json({ candidates });
   }),
 
   explorePublic: asyncHandler(async (req: Request, res: Response) => {

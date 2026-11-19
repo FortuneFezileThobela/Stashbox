@@ -5,20 +5,20 @@ import { EntriesService } from "../services/entries.service.js";
 export const EntriesController = {
   getById: asyncHandler(async (req: Request, res: Response) => {
     const { entryId } = req.params;
-    const entry = await EntriesService.getEntryById(entryId);
+    const entry = await EntriesService.getEntryById(entryId, req.user?.id);
 
     res.status(200).json({ entry });
   }),
 
   update: asyncHandler(async (req: Request, res: Response) => {
     const { entryId } = req.params;
-    const entry = await EntriesService.updateEntry(
+    const result = await EntriesService.updateEntry(
       entryId,
       req.user!.id,
       req.body,
     );
 
-    res.status(200).json({ entry });
+    res.status(200).json(result);
   }),
 
   remove: asyncHandler(async (req: Request, res: Response) => {
@@ -29,13 +29,14 @@ export const EntriesController = {
   }),
 
   list: asyncHandler(async (req: Request, res: Response) => {
-    const { workspaceId, language, search, tags, page, limit } =
+    const { workspaceId, language, search, status, tags, page, limit } =
       req.query as any;
 
     const result = await EntriesService.listEntries(req.user?.id, {
       workspaceId,
       language,
       search,
+      status,
       tags,
       page: page ? Number(page) : undefined,
       limit: limit ? Number(limit) : undefined,
@@ -53,6 +54,23 @@ export const EntriesController = {
     res.status(201).json({ entry });
   }),
 
+  submit: asyncHandler(async (req: Request, res: Response) => {
+    const entry = await EntriesService.submitEntry(
+      req.params.entryId,
+      req.user!.id,
+    );
+    res.status(200).json({ entry });
+  }),
+
+  approve: asyncHandler(async (req: Request, res: Response) => {
+    const entry = await EntriesService.approveEntry(
+      req.params.entryId,
+      req.user!.id,
+      Boolean(req.body?.forceOverride),
+    );
+    res.status(200).json({ entry });
+  }),
+
   fork: asyncHandler(async (req: Request, res: Response) => {
     const { entryId } = req.params;
     const { destinationWorkspaceId } = req.body;
@@ -65,18 +83,4 @@ export const EntriesController = {
 
     res.status(201).json({ entry });
   }),
-
-  submit: asyncHandler(async (req: Request, res: Response) => {
-  const entry = await EntriesService.submitEntry(req.params.entryId, req.user!.id);
-  res.status(200).json({ entry });
-}),
-
-approve: asyncHandler(async (req: Request, res: Response) => {
-  const entry = await EntriesService.approveEntry(
-    req.params.entryId,
-    req.user!.id,
-    Boolean(req.body?.forceOverride),
-  );
-  res.status(200).json({ entry });
-}),
 };

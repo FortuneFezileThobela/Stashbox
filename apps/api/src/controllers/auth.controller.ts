@@ -1,17 +1,13 @@
 import type { Request, Response, NextFunction } from "express";
 import { asyncHandler } from "../middleware/errorHandler.js";
 import { AuthService } from "../services/auth.service.js";
+import { hashApiToken } from "../middleware/auth.js";
 
 export const AuthController = {
-  getMe: asyncHandler(
-    async (req: Request, res: Response, next: NextFunction) => {
-      try {
-        res.status(200).json({ user: (req as any).user });
-      } catch (error) {
-        next(error);
-      }
-    },
-  ),
+  getMe: asyncHandler(async (req: Request, res: Response) => {
+    const user = await AuthService.getProfile(req.user!.id);
+    res.status(200).json({ user });
+  }),
 
   createToken: asyncHandler(async (req: Request, res: Response) => {
     const { name, expiresInDays } = req.body;
@@ -24,20 +20,17 @@ export const AuthController = {
     res.status(201).json(tokenData);
   }),
 
-  register: asyncHandler(async (req: Request, res: Response) => {
-    console.log("Registering user with data:", req.body);
+ register: asyncHandler(async (req: Request, res: Response) => {
     const result = await AuthService.register(req.body);
     res.status(201).json(result);
   }),
 
-  login: asyncHandler(async (req: Request, res: Response) => {
+ login: asyncHandler(async (req: Request, res: Response) => {
     const { email, password } = req.body;
-    console.log("Logging in user with email:", email);
-    console.log("Password provided:", password);
     const result = await AuthService.login({ email, password });
-
     res.status(200).json(result);
   }),
+
 
   updateMe: asyncHandler(async (req: Request, res: Response) => {
     const user = await AuthService.updateProfile(req.user!.id, req.body);
@@ -50,4 +43,11 @@ export const AuthController = {
 
     res.status(200).json(result);
   }),
+
+  listTokens: asyncHandler(async (req: Request, res: Response) => {
+    const raw = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+    const tokens = await AuthService.listTokens(req.user!.id, raw ? hashApiToken(raw) : undefined);
+    res.status(200).json({ tokens });
+  }),
+
 };

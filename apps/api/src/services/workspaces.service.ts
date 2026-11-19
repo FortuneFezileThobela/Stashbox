@@ -4,9 +4,10 @@ import {
   workspaces,
   workspaceMembers,
   entries,
+  users,
   NewWorkspace,
 } from "@stashbox/db/schema";
-import { eq, and, ilike, sql, or, desc, ne } from "drizzle-orm";
+import { eq, and, ilike, sql, or, desc, ne, asc, notExists } from "drizzle-orm"; // asc, notExists NEW
 
 export interface CreateWorkspaceParams {
   ownerId: string;
@@ -26,7 +27,8 @@ export interface ListWorkspacesParams {
 export interface AddWorkspaceMemberParams {
   workspaceId: string;
   requesterId: string;
-  targetUserId: string;
+  targetUserId?: string;
+  targetUsername?: string;
   role: "owner" | "qa" | "member";
 }
 
@@ -256,12 +258,25 @@ export class WorkspacesService {
     workspaceId: string,
     requesterId: string,
     page = 1,
-    limit = 20,
+    limit = 50,
   ) {
-    await this.assertWorkspaceAccess(workspaceId, requesterId, false);
+    const { role } = await this.assertWorkspaceAccess(
+      workspaceId,
+      requesterId,
+      false,
+    );
+
+    // A public library shows entries, not the people behind it
+    if (!role) {
+      throw new AppError(
+        403,
+        "Only members can see who is in this workspace.",
+        "FORBIDDEN",
+      );
+    }
 
     const validPage = page > 0 ? page : 1;
-    const validLimit = limit > 0 ? Math.min(limit, 100) : 20;
+    const validLimit = limit > 0 ? Math.min(limit, 100) : 50;
     const offset = (validPage - 1) * validLimit;
 
     const [countResult] = await db
@@ -271,12 +286,33 @@ export class WorkspacesService {
 
     const total = Number(countResult?.count ?? 0);
 
-    const members = await db
-      .select()
+    const rows = await db
+      .select({
+        userId: workspaceMembers.userId,
+        role: workspaceMembers.role,
+        joinedAt: workspaceMembers.joinedAt,
+        fullName: users.fullName,
+        username: users.username,
+        jobTitle: users.jobTitle,
+        profileUrl: users.profileUrl,
+        email: users.email,
+      })
       .from(workspaceMembers)
+      .innerJoin(users, eq(workspaceMembers.userId, users.userId))
       .where(eq(workspaceMembers.workspaceId, workspaceId))
+      // Owners first, then QA reviewers, then members; oldest first within each
+      .orderBy(
+        sql`case ${workspaceMembers.role} when 'owner' then 0 when 'qa' then 1 else 2 end`,
+        asc(workspaceMembers.joinedAt),
+      )
       .limit(validLimit)
       .offset(offset);
+
+    // Emails are only shown to owners
+    const members = rows.map(({ email, ...member }) => ({
+      ...member,
+      email: role === "owner" ? email : undefined,
+    }));
 
     return {
       members,
@@ -289,10 +325,83 @@ export class WorkspacesService {
     };
   }
 
+
+  static async searchMemberCandidates(
+    workspaceId: string,
+    requesterId: string,
+    search: string,
+  ) {
+    const { role } = await this.assertWorkspaceAccess(
+      workspaceId,
+      requesterId,
+      true,
+    );
+    if (role !== "owner") {
+      throw new AppError(403, "Only owners can add members", "FORBIDDEN");
+    }
+
+    const term = search.trim();
+    if (term.length < 2) return [];
+
+    const pattern = `%${term.replace(/[\\%_]/g, "\\$&")}%`;
+
+    return await db
+      .select({
+        userId: users.userId,
+        fullName: users.fullName,
+        username: users.username,
+        jobTitle: users.jobTitle,
+        profileUrl: users.profileUrl,
+      })
+      .from(users)
+      .where(
+        and(
+          or(ilike(users.fullName, pattern), ilike(users.username, pattern)),
+          notExists(
+            db
+              .select({ one: sql`1` })
+              .from(workspaceMembers)
+              .where(
+                and(
+                  eq(workspaceMembers.workspaceId, workspaceId),
+                  eq(workspaceMembers.userId, users.userId),
+                ),
+              ),
+          ),
+        ),
+      )
+      .orderBy(asc(users.fullName))
+      .limit(8);
+  }
+
+  private static async assertNotLastOwner(
+    workspaceId: string,
+    targetUserId: string,
+  ) {
+    const owners = await db
+      .select({ userId: workspaceMembers.userId })
+      .from(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, workspaceId),
+          eq(workspaceMembers.role, "owner"),
+        ),
+      );
+
+    if (owners.length === 1 && owners[0].userId === targetUserId) {
+      throw new AppError(
+        400,
+        "A workspace needs at least one owner. Make someone else an owner first.",
+        "LAST_OWNER",
+      );
+    }
+  }
+
   static async addMember({
     workspaceId,
     requesterId,
     targetUserId,
+    targetUsername,
     role,
   }: AddWorkspaceMemberParams) {
     const { role: requesterRole } = await this.assertWorkspaceAccess(
@@ -305,9 +414,35 @@ export class WorkspacesService {
       throw new AppError(403, "Only owners can manage members", "FORBIDDEN");
     }
 
+    let userId = targetUserId;
+    if (!userId && targetUsername) {
+      const [found] = await db
+        .select({ userId: users.userId })
+        .from(users)
+        .where(
+          eq(
+            users.username,
+            targetUsername.trim().toLowerCase().replace(/^@/, ""),
+          ),
+        )
+        .limit(1);
+
+      if (!found) {
+        throw new AppError(404, "No one has that username.", "USER_NOT_FOUND");
+      }
+      userId = found.userId;
+    }
+    if (!userId) {
+      throw new AppError(400, "Enter a username or user ID.", "BAD_REQUEST");
+    }
+
+    if (role !== "owner") {
+      await this.assertNotLastOwner(workspaceId, userId);
+    }
+
     const [membership] = await db
       .insert(workspaceMembers)
-      .values({ workspaceId, userId: targetUserId, role })
+      .values({ workspaceId, userId, role })
       .onConflictDoUpdate({
         target: [workspaceMembers.workspaceId, workspaceMembers.userId],
         set: { role },
@@ -316,6 +451,7 @@ export class WorkspacesService {
 
     return membership;
   }
+
 
   static async changeMemberRole(
     workspaceId: string,
@@ -331,6 +467,10 @@ export class WorkspacesService {
 
     if (requesterRole !== "owner") {
       throw new AppError(403, "Only owners can change roles", "FORBIDDEN");
+    }
+
+    if (role !== "owner") {
+      await this.assertNotLastOwner(workspaceId, targetUserId);
     }
 
     const [updated] = await db
@@ -350,6 +490,7 @@ export class WorkspacesService {
     return updated;
   }
 
+
   static async removeMember(
     workspaceId: string,
     requesterId: string,
@@ -364,6 +505,8 @@ export class WorkspacesService {
     if (requesterRole !== "owner" && requesterId !== targetUserId) {
       throw new AppError(403, "Insufficient permissions", "FORBIDDEN");
     }
+
+    await this.assertNotLastOwner(workspaceId, targetUserId);
 
     const [deleted] = await db
       .delete(workspaceMembers)

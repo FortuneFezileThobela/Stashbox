@@ -1,6 +1,6 @@
 import { AppError } from "../middleware/errorHandler.js";
 import { db } from "@stashbox/db";
-import { entries } from "@stashbox/db/schema";
+import { entries, entryProposals } from "@stashbox/db/schema";
 import { WorkspacesService } from "./workspaces.service.js";
 import { eq, and, ilike, sql, arrayOverlaps, or, ne, desc } from "drizzle-orm";
 
@@ -52,10 +52,16 @@ export interface UpdateEntryParams {
   forceApprove?: boolean;
 }
 
+export type UpdateEntryResult =
+  | { outcome: "updated"; entry: typeof entries.$inferSelect }
+  | {
+      outcome: "merged";
+      entry: typeof entries.$inferSelect;
+      proposal: typeof entryProposals.$inferSelect;
+    }
+  | { outcome: "proposed"; proposal: typeof entryProposals.$inferSelect };
+
 export class EntriesService {
-  /**
-   * Fetches an entry while enforcing draft privacy and workspace visibility.
-   */
   static async getEntryById(entryId: string, userId?: string) {
     const [entry] = await db
       .select()
@@ -73,12 +79,10 @@ export class EntriesService {
       false,
     );
 
-    // Drafts are strictly private to their author
     if (entry.status === "draft" && entry.createdBy !== userId) {
       throw new AppError(404, "Entry not found", "ENTRY_NOT_FOUND");
     }
 
-    // Non-members viewing a public workspace only see approved entries
     if (!role && entry.status !== "qa_approved") {
       throw new AppError(404, "Entry not found", "ENTRY_NOT_FOUND");
     }
@@ -170,7 +174,6 @@ export class EntriesService {
       );
     }
 
-    // Personal workspaces publish directly unless saved as draft; team entries enter QA
     const isPersonal = workspace.type === "personal";
     const status = params.saveAsDraft
       ? "draft"
@@ -208,7 +211,7 @@ export class EntriesService {
     entryId: string,
     userId: string,
     updates: UpdateEntryParams,
-  ) {
+  ): Promise<UpdateEntryResult> {
     const existing = await this.getEntryById(entryId, userId);
     const { workspace, role } = await WorkspacesService.assertWorkspaceAccess(
       existing.workspaceId,
@@ -216,54 +219,98 @@ export class EntriesService {
       true,
     );
 
-    if (existing.status === "draft" && existing.createdBy !== userId) {
-      throw new AppError(404, "Entry not found", "ENTRY_NOT_FOUND");
-    }
-
     const isPersonal = workspace.type === "personal";
-    const isOwner = role === "owner";
+    const isReviewer = role === "owner" || role === "qa";
+    const isOwnDraft =
+      existing.status === "draft" && existing.createdBy === userId;
+    const { saveAsDraft, forceApprove: _ignored, ...fields } = updates;
 
-    let nextStatus = existing.status;
-    let nextVerifiedBy = existing.verifiedBy;
-    let nextVerifiedAt = existing.verifiedAt;
-
-    if (updates.saveAsDraft) {
-      nextStatus = "draft";
-      nextVerifiedBy = null;
-      nextVerifiedAt = null;
-    } else if (isPersonal || (isOwner && updates.forceApprove)) {
-      nextStatus = "qa_approved";
-      nextVerifiedBy = userId;
-      nextVerifiedAt = new Date();
-    } else {
-      // Editing an entry in a team workspace dismisses stale approval
-      nextStatus = "pending_qa";
-      nextVerifiedBy = null;
-      nextVerifiedAt = null;
+    if (isOwnDraft) {
+      const nextStatus = saveAsDraft
+        ? "draft"
+        : isPersonal
+          ? "qa_approved"
+          : "pending_qa";
+      const [entry] = await db
+        .update(entries)
+        .set({
+          ...fields,
+          status: nextStatus,
+          verifiedBy: nextStatus === "qa_approved" ? userId : null,
+          verifiedAt: nextStatus === "qa_approved" ? new Date() : null,
+          updatedBy: userId,
+          updatedAt: new Date(),
+        })
+        .where(eq(entries.entryId, entryId))
+        .returning();
+      return { outcome: "updated", entry };
     }
 
-    const { saveAsDraft: _d, forceApprove: _f, ...fieldUpdates } = updates;
+    if (isPersonal) {
+      const [entry] = await db
+        .update(entries)
+        .set({
+          ...fields,
+          status: "qa_approved",
+          verifiedBy: userId,
+          verifiedAt: new Date(),
+          updatedBy: userId,
+          version: sql`${entries.version} + 1`,
+          updatedAt: new Date(),
+        })
+        .where(eq(entries.entryId, entryId))
+        .returning();
+      return { outcome: "updated", entry };
+    }
 
-    const [updatedEntry] = await db
-      .update(entries)
-      .set({
-        ...fieldUpdates,
-        status: nextStatus,
-        verifiedBy: nextVerifiedBy,
-        verifiedAt: nextVerifiedAt,
-        updatedBy: userId,
-        version: sql`${entries.version} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(eq(entries.entryId, entryId))
-      .returning();
+    return await db.transaction(async (tx) => {
+      const snapshot = {
+        targetWorkspaceId: existing.workspaceId,
+        targetEntryId: entryId,
+        type: "update_entry" as const,
+        entryType: existing.type,
+        title: fields.title ?? existing.title,
+        description: fields.description ?? existing.description,
+        code: fields.code ?? existing.code,
+        language: fields.language ?? existing.language,
+        notes: fields.notes ?? existing.notes,
+        gotchas: fields.gotchas ?? existing.gotchas,
+        dosAndDonts: fields.dosAndDonts ?? existing.dosAndDonts,
+        targetRuntimes: fields.targetRuntimes ?? existing.targetRuntimes,
+        authorId: userId,
+      };
 
-    return updatedEntry;
+      if (!isReviewer) {
+        const [proposal] = await tx
+          .insert(entryProposals)
+          .values({ ...snapshot, status: "pending" })
+          .returning();
+        return { outcome: "proposed" as const, proposal };
+      }
+
+      const [proposal] = await tx
+        .insert(entryProposals)
+        .values({ ...snapshot, status: "approved", reviewedBy: userId })
+        .returning();
+
+      const [entry] = await tx
+        .update(entries)
+        .set({
+          ...fields,
+          status: "qa_approved",
+          verifiedBy: userId,
+          verifiedAt: new Date(),
+          updatedBy: userId,
+          version: sql`${entries.version} + 1`,
+          updatedAt: new Date(),
+        })
+        .where(eq(entries.entryId, entryId))
+        .returning();
+
+      return { outcome: "merged" as const, entry, proposal };
+    });
   }
 
-  /**
-   * Transitions a private draft into pending_qa (team) or qa_approved (personal).
-   */
   static async submitEntry(entryId: string, userId: string) {
     const existing = await this.getEntryById(entryId, userId);
     if (existing.createdBy !== userId) {
@@ -298,15 +345,21 @@ export class EntriesService {
     return updated;
   }
 
-  /**
-   * Approves a pending_qa entry; enforces four-eyes review unless owner overrides.
-   */
   static async approveEntry(
     entryId: string,
     reviewerId: string,
     forceOverride = false,
   ) {
     const existing = await this.getEntryById(entryId, reviewerId);
+
+    if (existing.status !== "pending_qa") {
+      throw new AppError(
+        400,
+        "Only entries that are in review can be approved.",
+        "INVALID_ENTRY_STATE",
+      );
+    }
+
     const { role } = await WorkspacesService.assertWorkspaceAccess(
       existing.workspaceId,
       reviewerId,
@@ -367,9 +420,6 @@ export class EntriesService {
     return { deleted: true, entryId };
   }
 
-  /**
-   * Clones a visible entry into a destination workspace where the user is a member.
-   */
   static async forkEntry(
     userId: string,
     sourceEntryId: string,
