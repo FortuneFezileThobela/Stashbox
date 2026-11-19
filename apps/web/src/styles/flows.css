@@ -1,0 +1,299 @@
+
+/* ---------- Global toast ---------- */
+.toast-host {
+  position: fixed;
+  z-index: 60;
+  right: 20px;
+  bottom: 20px;
+  max-width: min(420px, calc(100vw - 40px));
+}
+.toast-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-30);
+  border-left-width: 4px;
+  border-radius: 8px;
+  box-shadow: var(--shadow-pop);
+  animation: rise 0.25s var(--ease) both;
+}
+.toast-success {
+  border-left-color: var(--ok);
+}
+.toast-error {
+  border-left-color: var(--danger);
+}
+.toast-info {
+  border-left-color: var(--accent-10);
+}
+.toast-card button {
+  margin-left: auto;
+  padding: 2px 6px;
+  color: var(--text-secondary);
+}
+.toast-card button:hover {
+  color: var(--text-primary);
+}
+
+/* ---------- Public read-only banner ---------- */
+.banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 20px;
+  background: var(--accent-10-subtle);
+  border-bottom: 1px solid var(--border-30);
+}
+
+/* ---------- Draft and status ---------- */
+.badge-private {
+  color: var(--text-secondary);
+  border-style: dashed;
+}
+.segmented.compact {
+  display: flex;
+}
+.segmented.compact button {
+  flex: 1;
+  padding: 5px 6px;
+  font-size: 12px;
+}
+
+/* ---------- Tabs ---------- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border-30);
+}
+.tab {
+  padding: 8px 12px;
+  border-radius: 0;
+  color: var(--text-secondary);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tab:hover {
+  color: var(--text-primary);
+}
+.tab[aria-selected="true"] {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent-10);
+  font-weight: 600;
+}
+.tab-count {
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--surface-elevated);
+  color: var(--text-secondary);
+}
+
+/* ---------- Proposal cards ---------- */
+.proposal-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.mini-avatar {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 50%;
+  object-fit: cover;
+  display: inline-grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--surface-elevated);
+  color: var(--text-secondary);
+}
+
+/* ---------- Code with line numbers and highlighted lines ---------- */
+.code-block pre.numbered {
+  padding: 14px 0;
+  counter-reset: ln;
+}
+.code-line {
+  display: block;
+  padding-right: 16px;
+  counter-increment: ln;
+}
+.code-line::before {
+  content: counter(ln);
+  display: inline-block;
+  width: 3.4em;
+  margin-right: 1em;
+  padding-right: 0.8em;
+  text-align: right;
+  color: var(--text-muted);
+  border-right: 1px solid var(--border-30);
+  user-select: none;
+}
+.code-line.is-highlighted {
+  background: var(--accent-10-subtle);
+}
+.code-line.is-highlighted::before {
+  color: var(--accent-10);
+  border-right-color: var(--accent-10);
+}
+
+/* ---------- Discussions ---------- */
+.thread {
+  background: var(--surface-30);
+  border: 1px solid var(--border-30);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.thread.is-open {
+  border-color: var(--text-muted);
+}
+.thread-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  border-radius: 0;
+}
+.thread-head:hover {
+  background: var(--surface-elevated);
+}
+.thread-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 14px 14px;
+  border-top: 1px solid var(--border-30);
+  padding-top: 14px;
+}
+.comment {
+  padding: 10px 12px;
+  border-left: 3px solid var(--border-30);
+  background: var(--bg-60);
+  border-radius: 0 6px 6px 0;
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.check input {
+  width: auto;
+}
+
+/* ---------- Flat status badges: no dot, no tint ---------- */
+.badge-ok::before,
+.badge-warn::before {
+  content: none;
+}
+.badge-ok {
+  background: transparent;
+  border: 1px solid var(--ok);
+  color: var(--ok);
+}
+.badge-warn {
+  background: transparent;
+  border: 1px solid var(--accent-10);
+  color: var(--accent-10);
+}
+.sample .badge-ok {
+  animation: none;
+}
+
+/* ---------- Browse public libraries ---------- */
+.explore-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+.explore-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* ---------- Members ---------- */
+.member-list,
+.token-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-30);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.member-row,
+.token-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--surface-30);
+}
+.member-row + .member-row,
+.token-row + .token-row {
+  border-top: 1px solid var(--border-30);
+}
+.member-avatar {
+  width: 32px;
+  height: 32px;
+  font-size: 12px;
+}
+.token-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+.token-row {
+  justify-content: space-between;
+}
+
+/* ---------- Search-as-you-type when adding a member ---------- */
+.combo {
+  position: relative;
+}
+.candidate-list {
+  list-style: none;
+  margin-top: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-30);
+  border-radius: 8px;
+}
+.candidate {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  border-radius: 0;
+}
+.candidate:hover {
+  background: var(--surface-30);
+}
+.candidate-note {
+  padding: 10px 12px;
+  color: var(--text-secondary);
+}
+.picked {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--surface-30);
+  border: 1px solid var(--border-30);
+  border-radius: 8px;
+}
