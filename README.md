@@ -3,6 +3,7 @@
 
 > **Scope Note:** This showcase presents the **Web + API** platform in full working form.
 > **Future Scope:** Create a VS Code extension companion to access snippets directly inside the editor.
+> **AI Acknowledgment:** Frontend design and UI workflows were built with assistance from **Gemini**.
 
 ---
 
