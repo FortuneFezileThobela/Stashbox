@@ -7,6 +7,7 @@
 
 ---
 
+
 ## Chapter 1: System Overview
 
 Stashbox is a place to store, review, and share code snippets and technical notes across personal and team workspaces.
