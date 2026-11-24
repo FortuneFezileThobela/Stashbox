@@ -1,10 +1,10 @@
 services:
-  postgres:
+  db:
     image: postgres:16-alpine
-    container_name: stashbox-postgres
+    container_name: stashbox-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
+      POSTGRES_USER: stashbox
       POSTGRES_PASSWORD: codemonk
       POSTGRES_DB: stashbox
     ports:
@@ -12,7 +12,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d stashbox"]
+      test: ["CMD-SHELL", "pg_isready -U stashbox -d stashbox"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -20,42 +20,29 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile.dev
+      dockerfile: apps/api/Dockerfile.dev
     container_name: stashbox-api
     restart: unless-stopped
-    ports:
-      - "4000:4000"
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
       NODE_ENV: development
       PORT: 4000
-      DATABASE_URL: postgres://postgres:codemonk@postgres:5432/stashbox
-    volumes:
-      - .:/app
-      - /app/node_modules
-      - /app/packages/db/node_modules
-      - /app/apps/api/node_modules
-    depends_on:
-      postgres:
-        condition: service_healthy
+      DATABASE_URL: postgresql://stashbox:codemonk@db:5432/stashbox
+    ports:
+      - "4000:4000"
 
-  studio:
+  web:
     build:
       context: .
-      dockerfile: Dockerfile.dev
-    container_name: stashbox-studio
+      dockerfile: apps/web/Dockerfile.dev
+    container_name: stashbox-web
     restart: unless-stopped
-    ports:
-      - "4983:4983"
-    environment:
-      DATABASE_URL: postgres://postgres:codemonk@postgres:5432/stashbox
-    command: npm run db:studio
-    volumes:
-      - .:/app
-      - /app/node_modules
-      - /app/packages/db/node_modules
     depends_on:
-      postgres:
-        condition: service_healthy
+      - api
+    ports:
+      - "5173:80"
 
 volumes:
   pgdata:

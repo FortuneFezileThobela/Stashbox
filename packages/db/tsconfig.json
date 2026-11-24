@@ -1,8 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": "./src",
-    "outDir": "./dist"
+    "rootDir": ".",
+    "outDir": "./dist",
+    "types": ["node"]
   },
-  "include": ["src/**/*", "drizzle.config.ts"]
+  "include": ["src/**/*", "drizzle.config.ts", "../../apps/api/src/middleware", "../../apps/api/src/routes"]
 }

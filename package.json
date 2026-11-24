@@ -6,14 +6,20 @@
     "apps/*"
   ],
   "scripts": {
-    "db:generate": "npm run --workspace=@stashbox/db generate",
-    "db:migrate": "npm run --workspace=@stashbox/db migrate",
-    "db:push": "npm run --workspace=@stashbox/db push",
-    "db:studio": "npm run --workspace=@stashbox/db studio",
-    "dev:api": "npm run --workspace=@stashbox/api dev"
+    "db:seed": "npm run db:seed --workspace=@stashbox/db",
+    "db:studio": "npx drizzle-kit studio --config=packages/db/drizzle.config.ts"
   },
   "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vite": "^8.3.7"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   }
 }
