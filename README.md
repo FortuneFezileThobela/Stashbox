@@ -1,8 +1,8 @@
 # Stashbox: Engineering Pattern & Snippet Repository
 ### A Reference Architecture for Collaborative Knowledge, Access Governance, and Code Review Workflows
 
-> **Scope Note:** This showcase presents the **Web + API** platform in full working form. The companion VS Code extension is intentionally deferred pending future schema and editor-workflow refinements.
-
+> **Scope Note:** This showcase presents the **Web + API** platform in full working form.
+> **Future Scope** Create a VS Cide extension companion that can allow access of snippets inside the editor.
 ---
 
 ## Chapter 1: System Overview & Problem Statement
